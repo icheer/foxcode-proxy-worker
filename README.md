@@ -22,7 +22,9 @@ Foxcode 需要在请求中包含 `metadata.user_id` 字段才能启用 Prompt �
 OpenAI Codex API 使用自动前缀缓存，但 `@mariozechner/pi-coding-agent` 的 `buildSystemPrompt()` 每次请求都注入动态时间戳（`Current date and time: ...`），导致前缀永远不匹配。本代理移除该时间戳以稳定缓存。
 
 ### Gemini 缓存
-Gemini 2.5+ 支持隐式缓存，同样需要移除动态时间戳。（注：部分中转站可能不支持）
+Gemini 2.5+ 支持隐式缓存，同样需要移除动态时间戳。
+
+> ⚠️ **注意：foxcode 中转站的 Gemini 渠道不支持隐式缓存，暂时不可用。其他中转站请自行测试。**
 
 ## 安装
 
