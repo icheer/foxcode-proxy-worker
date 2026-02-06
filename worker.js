@@ -186,7 +186,20 @@ async function handleGetRequest(request, url, config) {
   log.info(`[GET] ${url.pathname} -> ${targetUrl}`);
 
   try {
-    const forwardHeaders = {};
+    const forwardHeaders = {
+      // 添加浏览器特征 headers 以绕过 Cloudflare 检测
+      'User-Agent':
+        request.headers.get('user-agent') ||
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'application/json, text/plain, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
+      Pragma: 'no-cache',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'cross-site'
+    };
 
     // 传递认证 headers
     if (request.headers.get('authorization')) {
@@ -203,6 +216,14 @@ async function handleGetRequest(request, url, config) {
     if (request.headers.get('anthropic-version')) {
       forwardHeaders['anthropic-version'] =
         request.headers.get('anthropic-version');
+    }
+
+    // 传递 Referer 和 Origin（如果有）
+    if (request.headers.get('referer')) {
+      forwardHeaders['Referer'] = request.headers.get('referer');
+    }
+    if (request.headers.get('origin')) {
+      forwardHeaders['Origin'] = request.headers.get('origin');
     }
 
     const response = await fetch(targetUrl, {
