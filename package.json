@@ -1,17 +1,20 @@
 {
   "name": "foxcode-cache-proxy",
-  "version": "1.0.0",
-  "description": "Proxy to inject metadata.user_id for Foxcode prompt caching",
-  "main": "proxy.js",
+  "version": "2.0.0",
+  "description": "Proxy to inject metadata.user_id for Foxcode prompt caching - Cloudflare Workers",
+  "main": "worker.js",
   "type": "module",
   "scripts": {
-    "start": "node proxy.js"
+    "start": "node proxy.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "keywords": [
     "foxcode",
     "claude",
     "proxy",
     "cache",
+    "cloudflare-workers",
     "clawdbot"
   ],
   "author": "",
@@ -19,5 +22,8 @@
   "repository": {
     "type": "git",
     "url": ""
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
   }
 }

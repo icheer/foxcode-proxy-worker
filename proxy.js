@@ -1,50 +1,48 @@
 /**
- * Foxcode Unified Cache Proxy
- * 
+ * Foxcode Unified Cache Proxy - Cloudflare Workers Version
+ *
  * 统一代理，支持：
  * - Claude API: 注入 metadata.user_id
  * - Codex API: 注入 prompt_cache_key
- * 
+ * - Gemini API: 移除时间戳 + v1beta 路径
+ *
  * @author 琦琦 & 三胖
  */
 
-import { createServer } from 'http';
-import { randomUUID } from 'crypto';
-
 // ============ 配置 ============
-const CONFIG = {
-  port: parseInt(process.env.PROXY_PORT || '18800'),
-  targetHost: process.env.TARGET_HOST || 'code.newcli.com',
-  userId: process.env.USER_ID || 'openclaw-user',
-  
-  // Claude 渠道
-  claudeChannels: ['droid', 'aws', 'super', 'ultra'],
-  defaultClaudeChannel: 'droid',
-  
-  // Codex 渠道
-  codexChannels: ['codex'],
-  
-  // Gemini 渠道
-  geminiChannels: ['gemini'],
-  
-  // 重试配置
-  retry: {
-    maxAttempts: parseInt(process.env.RETRY_MAX || '3'),
-    initialDelayMs: parseInt(process.env.RETRY_DELAY || '1000'),
-    maxDelayMs: parseInt(process.env.RETRY_MAX_DELAY || '10000'),
-  },
-  
-  timeoutMs: parseInt(process.env.TIMEOUT_MS || '180000'),
-};
+function getConfig(env) {
+  return {
+    targetHost: env.TARGET_HOST || 'code.newcli.com',
+    userId: env.USER_ID || 'openclaw-user',
+
+    // Claude 渠道
+    claudeChannels: ['droid', 'aws', 'super', 'ultra'],
+
+    // Codex 渠道
+    codexChannels: ['codex'],
+
+    // Gemini 渠道
+    geminiChannels: ['gemini'],
+
+    // 重试配置
+    retry: {
+      maxAttempts: parseInt(env.RETRY_MAX || '3'),
+      initialDelayMs: parseInt(env.RETRY_DELAY || '1000'),
+      maxDelayMs: parseInt(env.RETRY_MAX_DELAY || '10000')
+    },
+
+    timeoutMs: parseInt(env.TIMEOUT_MS || '180000')
+  };
+}
 
 // ============ 日志 ============
 const log = {
-  info: (msg) => console.log(`[${new Date().toISOString()}] ℹ️  ${msg}`),
-  error: (msg) => console.error(`[${new Date().toISOString()}] ❌ ${msg}`),
-  success: (msg) => console.log(`[${new Date().toISOString()}] ✅ ${msg}`),
-  claude: (msg) => console.log(`[${new Date().toISOString()}] 🟣 ${msg}`),
-  codex: (msg) => console.log(`[${new Date().toISOString()}] 🟢 ${msg}`),
-  gemini: (msg) => console.log(`[${new Date().toISOString()}] 🔵 ${msg}`),
+  info: msg => console.log(`[${new Date().toISOString()}] ℹ️  ${msg}`),
+  error: msg => console.error(`[${new Date().toISOString()}] ❌ ${msg}`),
+  success: msg => console.log(`[${new Date().toISOString()}] ✅ ${msg}`),
+  claude: msg => console.log(`[${new Date().toISOString()}] 🟣 ${msg}`),
+  codex: msg => console.log(`[${new Date().toISOString()}] 🟢 ${msg}`),
+  gemini: msg => console.log(`[${new Date().toISOString()}] 🔵 ${msg}`)
 };
 
 // ============ 会话缓存 Key 管理 ============
@@ -79,7 +77,13 @@ function getRetryDelay(attempt) {
 }
 
 function isRetryableError(error) {
-  const codes = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'];
+  const codes = [
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN'
+  ];
   return codes.includes(error.code) || error.message?.includes('fetch failed');
 }
 
@@ -87,9 +91,9 @@ function isRetryableError(error) {
 function parseRequestType(url) {
   const match = url.match(/^\/([^\/]+)/);
   if (!match) return { type: 'unknown', channel: null };
-  
+
   const channel = match[1];
-  
+
   if (CONFIG.claudeChannels.includes(channel)) {
     return { type: 'claude', channel };
   }
@@ -99,7 +103,7 @@ function parseRequestType(url) {
   if (CONFIG.geminiChannels.includes(channel)) {
     return { type: 'gemini', channel };
   }
-  
+
   return { type: 'unknown', channel };
 }
 
@@ -108,11 +112,13 @@ async function handleRequest(req, res) {
   // 健康检查
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      status: 'ok',
-      codexSessions: sessionCacheKeys.size,
-      timestamp: Date.now() 
-    }));
+    res.end(
+      JSON.stringify({
+        status: 'ok',
+        codexSessions: sessionCacheKeys.size,
+        timestamp: Date.now()
+      })
+    );
     return;
   }
 
@@ -153,10 +159,12 @@ async function handleRequest(req, res) {
 async function handleClaudeRequest(data, req, res, channel) {
   // 注入 metadata.user_id
   data.metadata = { ...data.metadata, user_id: CONFIG.userId };
-  
+
   const targetUrl = `https://${CONFIG.targetHost}/claude/${channel}/v1/messages`;
-  log.claude(`[${channel}] model=${data.model}, messages=${data.messages?.length || 0}`);
-  
+  log.claude(
+    `[${channel}] model=${data.model}, messages=${data.messages?.length || 0}`
+  );
+
   await forwardWithRetry(data, req.headers, res, targetUrl, 'claude');
 }
 
@@ -164,31 +172,37 @@ async function handleClaudeRequest(data, req, res, channel) {
 async function handleGeminiRequest(data, req, res) {
   // ===== 移除时间戳以稳定缓存 =====
   let timestampRemoved = false;
-  
+
   // Gemini 格式：systemInstruction.parts[0].text
   if (data.systemInstruction?.parts?.[0]?.text) {
     const before = data.systemInstruction.parts[0].text.length;
-    data.systemInstruction.parts[0].text = removeTimestamp(data.systemInstruction.parts[0].text);
+    data.systemInstruction.parts[0].text = removeTimestamp(
+      data.systemInstruction.parts[0].text
+    );
     if (data.systemInstruction.parts[0].text.length !== before) {
       timestampRemoved = true;
-      log.gemini(`[CACHE] Removed timestamp from systemInstruction (${before} -> ${data.systemInstruction.parts[0].text.length})`);
+      log.gemini(
+        `[CACHE] Removed timestamp from systemInstruction (${before} -> ${data.systemInstruction.parts[0].text.length})`
+      );
     }
   }
-  
+
   if (timestampRemoved) {
     log.gemini(`[CACHE] Timestamp removed for stable caching`);
   }
   // ===== 时间戳移除完成 =====
-  
+
   // 保存请求用于分析（调试完成后可注释）
   // saveGeminiDump(data);
-  
+
   // 转发到 Gemini 端点（硬编码 v1beta 前缀）
   // 原始路径: /gemini/models/xxx → 转发到: /gemini/v1beta/models/xxx
   const geminiPath = req.url.replace(/^\/gemini/, '/gemini/v1beta');
   const targetUrl = `https://${CONFIG.targetHost}${geminiPath}`;
-  log.gemini(`contents=${data.contents?.length || 0}, timestampRemoved=${timestampRemoved}, path=${geminiPath}`);
-  
+  log.gemini(
+    `contents=${data.contents?.length || 0}, timestampRemoved=${timestampRemoved}, path=${geminiPath}`
+  );
+
   await forwardDirect(data, req.headers, res, targetUrl, log.gemini);
 }
 
@@ -196,15 +210,15 @@ function saveGeminiDump(data) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `gemini-${timestamp}.json`;
   const filepath = join(DUMP_DIR, filename);
-  
+
   const dump = {
     timestamp: new Date().toISOString(),
     model: data.model,
     messages_count: data.messages?.length || 0,
     // 保存完整请求结构
-    full_request: data,
+    full_request: data
   };
-  
+
   writeFileSync(filepath, JSON.stringify(dump, null, 2));
   log.gemini(`[DUMP] Saved to ${filename}`);
 }
@@ -220,18 +234,19 @@ function saveRequestDump(data, sessionId) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `codex-${timestamp}.json`;
   const filepath = join(DUMP_DIR, filename);
-  
+
   // 提取系统提示（可能在 instructions 或 input[0]）
   let systemPrompt = data.instructions || '';
   if (!systemPrompt && Array.isArray(data.input)) {
     const systemMsg = data.input.find(m => m.role === 'system');
     if (systemMsg) {
-      systemPrompt = typeof systemMsg.content === 'string' 
-        ? systemMsg.content 
-        : JSON.stringify(systemMsg.content);
+      systemPrompt =
+        typeof systemMsg.content === 'string'
+          ? systemMsg.content
+          : JSON.stringify(systemMsg.content);
     }
   }
-  
+
   const dump = {
     timestamp: new Date().toISOString(),
     sessionId,
@@ -243,16 +258,16 @@ function saveRequestDump(data, sessionId) {
     system_prompt: systemPrompt,
     system_prompt_length: systemPrompt.length,
     // 保存 input 结构
-    input_structure: Array.isArray(data.input) 
-      ? data.input.map(item => ({ 
-          role: item.role, 
+    input_structure: Array.isArray(data.input)
+      ? data.input.map(item => ({
+          role: item.role,
           content_length: JSON.stringify(item.content || item).length,
           // 保存前500字符预览
           preview: JSON.stringify(item.content || item).slice(0, 500)
         }))
-      : null,
+      : null
   };
-  
+
   writeFileSync(filepath, JSON.stringify(dump, null, 2));
   log.codex(`[DUMP] Saved to ${filename}`);
   return filepath;
@@ -261,28 +276,31 @@ function saveRequestDump(data, sessionId) {
 // ============ Codex 请求处理 ============
 async function handleCodexRequest(data, req, res) {
   // 提取会话ID
-  const sessionId = req.headers['x-session-key'] 
-    || data.metadata?.session_id 
-    || data.user 
-    || 'default';
-  
+  const sessionId =
+    req.headers['x-session-key'] ||
+    data.metadata?.session_id ||
+    data.user ||
+    'default';
+
   // 打印原始请求信息（调试用）
   const originalCacheKey = data.prompt_cache_key;
   log.codex(`[DEBUG] Original prompt_cache_key: ${originalCacheKey || 'none'}`);
-  
+
   // ===== 移除时间戳以稳定缓存 =====
   let timestampRemoved = false;
-  
+
   // 1. 处理 instructions 字段
   if (data.instructions && typeof data.instructions === 'string') {
     const before = data.instructions.length;
     data.instructions = removeTimestamp(data.instructions);
     if (data.instructions.length !== before) {
       timestampRemoved = true;
-      log.codex(`[CACHE] Removed timestamp from instructions (${before} -> ${data.instructions.length})`);
+      log.codex(
+        `[CACHE] Removed timestamp from instructions (${before} -> ${data.instructions.length})`
+      );
     }
   }
-  
+
   // 2. 处理 input 数组中的 system 消息
   if (Array.isArray(data.input)) {
     for (const msg of data.input) {
@@ -291,49 +309,56 @@ async function handleCodexRequest(data, req, res) {
         msg.content = removeTimestamp(msg.content);
         if (msg.content.length !== before) {
           timestampRemoved = true;
-          log.codex(`[CACHE] Removed timestamp from system message (${before} -> ${msg.content.length})`);
+          log.codex(
+            `[CACHE] Removed timestamp from system message (${before} -> ${msg.content.length})`
+          );
         }
       }
     }
   }
-  
+
   if (timestampRemoved) {
     log.codex(`[CACHE] Timestamp removed for stable caching`);
   }
   // ===== 时间戳移除完成 =====
-  
+
   // 保存请求内容（移除时间戳后）- 调试完成，已禁用
   // saveRequestDump(data, sessionId);
-  
+
   // 注入 prompt_cache_key
   if (!data.prompt_cache_key) {
     data.prompt_cache_key = getCacheKey(sessionId);
   }
-  
+
   // 固定转发到 /codex/v1/responses（和 Claude 风格一致）
   const targetUrl = `https://${CONFIG.targetHost}/codex/v1/responses`;
-  log.codex(`[${sessionId}] model=${data.model}, cache_key=${data.prompt_cache_key}, injected=${!originalCacheKey}`);
-  
+  log.codex(
+    `[${sessionId}] model=${data.model}, cache_key=${data.prompt_cache_key}, injected=${!originalCacheKey}`
+  );
+
   await forwardDirect(data, req.headers, res, targetUrl);
 }
 
 // ============ 转发函数 ============
 async function forwardWithRetry(data, headers, res, targetUrl, type) {
   let lastError;
-  
+
   for (let attempt = 0; attempt < CONFIG.retry.maxAttempts; attempt++) {
     try {
       if (attempt > 0) {
         const delay = getRetryDelay(attempt - 1);
-        log.info(`Retry ${attempt}/${CONFIG.retry.maxAttempts} after ${delay}ms`);
+        log.info(
+          `Retry ${attempt}/${CONFIG.retry.maxAttempts} after ${delay}ms`
+        );
         await sleep(delay);
       }
-      
+
       await forwardClaude(data, headers, res, targetUrl);
       return;
     } catch (err) {
       lastError = err;
-      if (!isRetryableError(err) || attempt === CONFIG.retry.maxAttempts - 1) throw err;
+      if (!isRetryableError(err) || attempt === CONFIG.retry.maxAttempts - 1)
+        throw err;
       log.error(`Attempt ${attempt + 1} failed: ${err.message}`);
     }
   }
@@ -343,23 +368,23 @@ async function forwardWithRetry(data, headers, res, targetUrl, type) {
 async function forwardClaude(data, headers, res, targetUrl) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
-  
+
   try {
     const response = await fetch(targetUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': headers.authorization,
+        Authorization: headers.authorization,
         'anthropic-version': headers['anthropic-version'] || '2023-06-01',
-        'anthropic-beta': headers['anthropic-beta'] || '',
+        'anthropic-beta': headers['anthropic-beta'] || ''
       },
       body: JSON.stringify(data),
-      signal: controller.signal,
+      signal: controller.signal
     });
 
     clearTimeout(timeout);
     res.writeHead(response.status, {
-      'Content-Type': response.headers.get('content-type') || 'application/json',
+      'Content-Type': response.headers.get('content-type') || 'application/json'
     });
 
     const reader = response.body.getReader();
@@ -378,38 +403,41 @@ async function forwardClaude(data, headers, res, targetUrl) {
 async function forwardDirect(data, headers, res, targetUrl, logFn = log.codex) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
-  
+
   try {
     // 传递所有可能需要的 header
     const forwardHeaders = {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json'
     };
     // 传递 Authorization 或 x-goog-api-key
-    if (headers.authorization) forwardHeaders['Authorization'] = headers.authorization;
-    if (headers['x-goog-api-key']) forwardHeaders['x-goog-api-key'] = headers['x-goog-api-key'];
-    
+    if (headers.authorization)
+      forwardHeaders['Authorization'] = headers.authorization;
+    if (headers['x-goog-api-key'])
+      forwardHeaders['x-goog-api-key'] = headers['x-goog-api-key'];
+
     const response = await fetch(targetUrl, {
       method: 'POST',
       headers: forwardHeaders,
       body: JSON.stringify(data),
-      signal: controller.signal,
+      signal: controller.signal
     });
 
     clearTimeout(timeout);
-    
+
     // 捕获错误响应内容
     if (response.status >= 400) {
       const errorBody = await response.text();
       logFn(`Response ${response.status}: ${errorBody.slice(0, 500)}`);
       res.writeHead(response.status, {
-        'Content-Type': response.headers.get('content-type') || 'application/json',
+        'Content-Type':
+          response.headers.get('content-type') || 'application/json'
       });
       res.end(errorBody);
       return;
     }
-    
+
     res.writeHead(response.status, {
-      'Content-Type': response.headers.get('content-type') || 'application/json',
+      'Content-Type': response.headers.get('content-type') || 'application/json'
     });
 
     const reader = response.body.getReader();
@@ -421,24 +449,28 @@ async function forwardDirect(data, headers, res, targetUrl, logFn = log.codex) {
       res.write(value);
     }
     res.end();
-    
+
     // 尝试解析响应内容，查找缓存信息
     try {
       const fullResponse = Buffer.concat(chunks).toString();
       // SSE 格式：查找 usageMetadata
-      const usageMatch = fullResponse.match(/"usageMetadata"\s*:\s*(\{[^}]+\})/);
+      const usageMatch = fullResponse.match(
+        /"usageMetadata"\s*:\s*(\{[^}]+\})/
+      );
       if (usageMatch) {
         logFn(`[USAGE] ${usageMatch[1]}`);
       }
       // 查找 cachedContentTokenCount
-      const cacheMatch = fullResponse.match(/"cachedContentTokenCount"\s*:\s*(\d+)/);
+      const cacheMatch = fullResponse.match(
+        /"cachedContentTokenCount"\s*:\s*(\d+)/
+      );
       if (cacheMatch) {
         logFn(`[CACHE HIT] cachedContentTokenCount: ${cacheMatch[1]}`);
       }
     } catch (e) {
       // 忽略解析错误
     }
-    
+
     logFn(`Response ${response.status}`);
   } finally {
     clearTimeout(timeout);
@@ -449,10 +481,15 @@ async function forwardRaw(body, req, res) {
   const targetUrl = `https://${CONFIG.targetHost}${req.url}`;
   const response = await fetch(targetUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': req.headers.authorization },
-    body,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: req.headers.authorization
+    },
+    body
   });
-  res.writeHead(response.status, { 'Content-Type': response.headers.get('content-type') });
+  res.writeHead(response.status, {
+    'Content-Type': response.headers.get('content-type')
+  });
   const reader = response.body.getReader();
   while (true) {
     const { done, value } = await reader.read();
@@ -471,10 +508,17 @@ log.info(`Codex channels: ${CONFIG.codexChannels.join(', ')}`);
 log.info(`Gemini channels: ${CONFIG.geminiChannels.join(', ')}`);
 
 const server = createServer(handleRequest);
-server.on('error', (err) => { log.error(`Server error: ${err.message}`); process.exit(1); });
+server.on('error', err => {
+  log.error(`Server error: ${err.message}`);
+  process.exit(1);
+});
 server.listen(CONFIG.port, '127.0.0.1', () => {
   log.success(`Proxy ready at http://127.0.0.1:${CONFIG.port}`);
 });
 
-process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
-process.on('SIGINT', () => { server.close(() => process.exit(0)); });
+process.on('SIGTERM', () => {
+  server.close(() => process.exit(0));
+});
+process.on('SIGINT', () => {
+  server.close(() => process.exit(0));
+});
