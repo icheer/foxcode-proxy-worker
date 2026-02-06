@@ -119,6 +119,11 @@ async function handleRequest(request, env) {
     );
   }
 
+  // 处理 GET 请求（查询模型列表等）
+  if (request.method === 'GET') {
+    return await handleGetRequest(request, url, config);
+  }
+
   if (request.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
       status: 405,
@@ -146,6 +151,80 @@ async function handleRequest(request, env) {
     log.error(`Request failed: ${err.message}`);
     return new Response(JSON.stringify({ error: err.message }), {
       status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// ============ GET 请求处理 ============
+async function handleGetRequest(request, url, config) {
+  const { type, channel } = parseRequestType(url, config);
+
+  let targetPath = url.pathname;
+  let targetChannel = channel;
+
+  // 如果是标准 Claude API 路径（/v1/models 等），使用默认渠道
+  if (url.pathname.startsWith('/v1/')) {
+    targetChannel = config.claudeChannels[0]; // 使用 droid 作为默认渠道
+    targetPath = `/claude/${targetChannel}${url.pathname}`;
+    log.info(`[GET] Standard API path detected, routing to ${targetChannel}`);
+  }
+  // Gemini 需要添加 v1beta 前缀
+  else if (type === 'gemini') {
+    targetPath = targetPath.replace(/^\/gemini/, '/gemini/v1beta');
+  }
+  // Claude 渠道路径
+  else if (type === 'claude') {
+    targetPath = `/claude/${channel}${url.pathname.replace(/^\/[^\/]+/, '')}`;
+    if (!targetPath.includes('/v1/')) {
+      targetPath = `/claude/${channel}/v1/models`;
+    }
+  }
+
+  const targetUrl = `https://${config.targetHost}${targetPath}${url.search}`;
+
+  log.info(`[GET] ${url.pathname} -> ${targetUrl}`);
+
+  try {
+    const forwardHeaders = {};
+
+    // 传递认证 headers
+    if (request.headers.get('authorization')) {
+      forwardHeaders['Authorization'] = request.headers.get('authorization');
+    }
+    if (request.headers.get('x-api-key')) {
+      forwardHeaders['x-api-key'] = request.headers.get('x-api-key');
+    }
+    if (request.headers.get('x-goog-api-key')) {
+      forwardHeaders['x-goog-api-key'] = request.headers.get('x-goog-api-key');
+    }
+
+    // 传递 Claude 特有的 headers
+    if (request.headers.get('anthropic-version')) {
+      forwardHeaders['anthropic-version'] =
+        request.headers.get('anthropic-version');
+    }
+
+    const response = await fetch(targetUrl, {
+      method: 'GET',
+      headers: forwardHeaders
+    });
+
+    return new Response(response.body, {
+      status: response.status,
+      headers: {
+        'Content-Type':
+          response.headers.get('content-type') || 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers':
+          'Content-Type, Authorization, x-api-key, anthropic-version'
+      }
+    });
+  } catch (err) {
+    log.error(`GET request failed: ${err.message}`);
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 502,
       headers: { 'Content-Type': 'application/json' }
     });
   }
@@ -329,7 +408,11 @@ async function forwardClaude(data, headers, targetUrl, config) {
       status: response.status,
       headers: {
         'Content-Type':
-          response.headers.get('content-type') || 'application/json'
+          response.headers.get('content-type') || 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers':
+          'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta'
       }
     });
   } catch (err) {
@@ -392,7 +475,11 @@ async function forwardDirect(
       status: response.status,
       headers: {
         'Content-Type':
-          response.headers.get('content-type') || 'application/json'
+          response.headers.get('content-type') || 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers':
+          'Content-Type, Authorization, x-api-key, x-goog-api-key'
       }
     });
   } catch (err) {
@@ -423,13 +510,29 @@ async function forwardRaw(body, request, url, config) {
 // ============ Workers 入口 ============
 export default {
   async fetch(request, env, ctx) {
+    // 处理 CORS 预检请求
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers':
+            'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta, x-goog-api-key',
+          'Access-Control-Max-Age': '86400'
+        }
+      });
+    }
+
     try {
       return await handleRequest(request, env);
     } catch (err) {
       log.error(`Unhandled error: ${err.message}`);
       return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
         status: 500,
-        headers: { 'Content-Type': 'application/json' }
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
       });
     }
   }
